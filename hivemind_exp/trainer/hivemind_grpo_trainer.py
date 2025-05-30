@@ -6,6 +6,7 @@ from typing import Any
 
 import datasets
 import torch
+import torch.distributed
 from hivemind.dht import DHT
 from hivemind.utils import get_dht_time
 from trl import GRPOConfig, GRPOTrainer
@@ -133,6 +134,9 @@ class HivemindGRPOTrainer:
             log_tag = self.node.key
 
         self.logger = logging.getLogger(f"{__name__}:{log_tag}")
+        
+        # Initialize wandb_run to None by default
+        self.wandb_run = None
         if "wandb" in self.config.report_to:
             self.wandb_run = wandb.init(project='rl-swarm', dir='logs', name=get_name_from_peer_id(self.node.key, True), mode="offline")
 
@@ -222,7 +226,14 @@ class HivemindGRPOTrainer:
             pass
 
         self.node.clear_stage_cache()
-        self.wandb_run.finish()
+        
+        # Only finish wandb run if it was initialized
+        if self.wandb_run is not None:
+            self.wandb_run.finish()
+        
+        # Properly destroy process group to avoid NCCL warning
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
     def train_stage_and_save(self, trainer, train_dataset):
         for _ in range(MAX_TRAIN_FAILS):
@@ -342,3 +353,7 @@ class HivemindGRPOTrainer:
             self.logger.debug(print_system_info())
             self.logger.exception("Exception during training", stack_info=True)
             raise
+        finally:
+            # Ensure cleanup happens even on normal exit
+            if torch.distributed.is_initialized():
+                torch.distributed.destroy_process_group()

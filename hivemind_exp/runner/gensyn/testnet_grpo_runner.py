@@ -53,15 +53,36 @@ class TestnetGRPORunner(GRPORunner):
         if not initial_peers:
             initial_peers = self.get_initial_peers()
             logger.info(f"Retrieved initial peers from chain: {initial_peers}")
+            # If no valid peers from chain, start as bootnode
+            if not initial_peers:
+                logger.info("No bootnodes found on chain, starting as bootnode!")
+                initial_peers = []
         elif initial_peers == ["BOOT"]:
             initial_peers = []
             logger.info("Proceeding as bootnode!")
 
         grpo_args.initial_peers = initial_peers
-        super().run(
-            model_args,
-            grpo_args,
-            training_args,
-            initial_datasets_fn,
-            partial(TestnetGRPOTrainer, coordinator=self.coordinator),
-        )
+        
+        # Add option to force bootstrap mode if initial peers are unreachable
+        try:
+            super().run(
+                model_args,
+                grpo_args,
+                training_args,
+                initial_datasets_fn,
+                partial(TestnetGRPOTrainer, coordinator=self.coordinator),
+            )
+        except RuntimeError as e:
+            if "DHTNode bootstrap failed" in str(e) and initial_peers:
+                logger.warning(f"Failed to connect to initial peers: {initial_peers}")
+                logger.info("Retrying as bootstrap node...")
+                grpo_args.initial_peers = []
+                super().run(
+                    model_args,
+                    grpo_args,
+                    training_args,
+                    initial_datasets_fn,
+                    partial(TestnetGRPOTrainer, coordinator=self.coordinator),
+                )
+            else:
+                raise
