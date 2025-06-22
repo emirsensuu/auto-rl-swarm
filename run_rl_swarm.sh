@@ -80,6 +80,124 @@ cat << "EOF"
 
 EOF
 
+# --- Automatic Setup Logic ---
+
+# Function to perform automatic setup based on detected GPU
+perform_automatic_setup() {
+    echo_green ">> Starting automatic setup..."
+    if ! command -v nvidia-smi &> /dev/null; then
+        echo "nvidia-smi not found. Cannot perform automatic setup. Falling back to manual setup."
+        return 1 # Indicates failure, main script will proceed with manual
+    fi
+
+    GPU_NAME=$(nvidia-smi --query-gpu=gpu_name --format=csv,noheader,nounits | head -n 1)
+    NORMALIZED_GPU_NAME=$(echo "$GPU_NAME" | tr '[:upper:]' '[:lower:]' | sed -e 's/nvidia //g' -e 's/geforce //g' -e 's/ //g' -e 's/-//g')
+    echo_blue ">> Detected GPU: $GPU_NAME (Normalized: $NORMALIZED_GPU_NAME)"
+
+    SPECIAL_CONFIG_DIR="$ROOT/hivemind_exp/configs/gpu/special configs"
+    AVAILABLE_CONFIGS=()
+    while IFS= read -r -d $'\0'; do
+        AVAILABLE_CONFIGS+=("$REPLY")
+    done < <(find "$SPECIAL_CONFIG_DIR" -name "*-${NORMALIZED_GPU_NAME}-deepseek-r1.yaml" -print0)
+
+    if [ ${#AVAILABLE_CONFIGS[@]} -eq 0 ]; then
+        echo "No special config found for your GPU ($GPU_NAME). Falling back to manual setup."
+        return 1 # Fallback to manual
+    fi
+
+    declare -a param_options
+    declare -A config_map
+    has_large_model=false
+
+    for config_path in "${AVAILABLE_CONFIGS[@]}"; do
+        filename=$(basename "$config_path")
+        if [[ "$filename" =~ grpo-qwen-2.5-([0-9\.]+)b-.* ]]; then
+            param_size="${BASH_REMATCH[1]}"
+            param_options+=("$param_size")
+            config_map["$param_size"]="$config_path"
+            
+            if (( $(echo "$param_size >= 32" | bc -l) )); then
+                has_large_model=true
+            fi
+        fi
+    done
+    
+    # Get unique sorted list of parameter options
+    IFS=" " read -r -a param_options <<< "$(echo "${param_options[@]}" | tr ' ' '\n' | sort -un | tr '\n' ' ')"
+
+
+    if [ "$has_large_model" = true ]; then
+        swarm_prompt="Math (A) or Math Hard (B)? [b/A]"
+        default_swarm="B"
+    else
+        swarm_prompt="Math (A) or Math Hard (B)? [A/b]"
+        default_swarm="A"
+    fi
+
+    while true; do
+        echo -en $GREEN_TEXT
+        read -p ">> Based on your GPU, we recommend Math Hard. Which swarm would you like to join ($swarm_prompt) " ab
+        echo -en $RESET_TEXT
+        ab=${ab:-$default_swarm}
+        case $ab in
+            [Aa]*)  USE_BIG_SWARM=false && break ;;
+            [Bb]*)  USE_BIG_SWARM=true && break ;;
+            *)  echo ">>> Please answer A or B." ;;
+        esac
+    done
+
+    while true; do
+        echo -en $GREEN_TEXT
+        param_list=$(IFS=, ; echo "${param_options[*]}")
+        read -p ">> For your $GPU_NAME, available parameter sizes are [$param_list]. Please choose one: " pc
+        echo -en $RESET_TEXT
+        
+        is_valid=false
+        for option in "${param_options[@]}"; do
+            if [[ "$pc" == "$option" ]]; then
+                is_valid=true
+                break
+            fi
+        done
+
+        if [ "$is_valid" = true ]; then
+            PARAM_B=$pc
+            break
+        else
+            echo ">>> Invalid selection. Please choose from [$param_list]."
+        fi
+    done
+
+    CONFIG_PATH=${config_map[$PARAM_B]}
+    echo_blue ">> Using selected special config: $CONFIG_PATH"
+    return 0 # Success
+}
+
+
+# --- Main Setup Flow ---
+
+while true; do
+    echo -en $GREEN_TEXT
+    read -p ">> Would you like to use automatic (recommended) or manual setup? [A/m] " am
+    echo -en $RESET_TEXT
+    am=${am:-A}
+    case $am in
+        [Aa]*)
+            if perform_automatic_setup; then
+                SETUP_MODE="AUTO"
+            else
+                SETUP_MODE="MANUAL"
+            fi
+            break
+            ;;
+        [Mm]*)
+            SETUP_MODE="MANUAL"
+            break
+            ;;
+        *) echo ">>> Please answer A or M." ;;
+    esac
+done
+
 while true; do
     echo -en $GREEN_TEXT
     read -p ">> Would you like to connect to the Testnet? [Y/n] " yn
@@ -92,32 +210,35 @@ while true; do
     esac
 done
 
-while true; do
-    echo -en $GREEN_TEXT
-    read -p ">> Which swarm would you like to join (Math (A) or Math Hard (B))? [A/b] " ab
-    echo -en $RESET_TEXT
-    ab=${ab:-A}  # Default to "A" if the user presses Enter
-    case $ab in
-        [Aa]*)  USE_BIG_SWARM=false && break ;;
-        [Bb]*)  USE_BIG_SWARM=true && break ;;
-        *)  echo ">>> Please answer A or B." ;;
-    esac
-done
+if [ "$SETUP_MODE" == "MANUAL" ]; then
+    while true; do
+        echo -en $GREEN_TEXT
+        read -p ">> Which swarm would you like to join (Math (A) or Math Hard (B))? [A/b] " ab
+        echo -en $RESET_TEXT
+        ab=${ab:-A}  # Default to "A" if the user presses Enter
+        case $ab in
+            [Aa]*)  USE_BIG_SWARM=false && break ;;
+            [Bb]*)  USE_BIG_SWARM=true && break ;;
+            *)  echo ">>> Please answer A or B." ;;
+        esac
+    done
+    while true; do
+        echo -en $GREEN_TEXT
+        read -p ">> How many parameters (in billions)? [0.5, 1.5, 7, 32, 72] " pc
+        echo -en $RESET_TEXT
+        pc=${pc:-0.5}  # Default to "0.5" if the user presses Enter
+        case $pc in
+            0.5 | 1.5 | 7 | 32 | 72) PARAM_B=$pc && break ;;
+            *)  echo ">>> Please answer in [0.5, 1.5, 7, 32, 72]." ;;
+        esac
+    done
+fi
+
 if [ "$USE_BIG_SWARM" = true ]; then
     SWARM_CONTRACT="$BIG_SWARM_CONTRACT"
 else
     SWARM_CONTRACT="$SMALL_SWARM_CONTRACT"
 fi
-while true; do
-    echo -en $GREEN_TEXT
-    read -p ">> How many parameters (in billions)? [0.5, 1.5, 7, 32, 72] " pc
-    echo -en $RESET_TEXT
-    pc=${pc:-0.5}  # Default to "0.5" if the user presses Enter
-    case $pc in
-        0.5 | 1.5 | 7 | 32 | 72) PARAM_B=$pc && break ;;
-        *)  echo ">>> Please answer in [0.5, 1.5, 7, 32, 72]." ;;
-    esac
-done
 
 # Create logs directory if it doesn't exist
 mkdir -p "$ROOT/logs"
@@ -219,11 +340,14 @@ else
     pip install -r "$ROOT"/requirements-gpu.txt
     pip install flash-attn --no-build-isolation
 
-    case "$PARAM_B" in
-        32 | 72) CONFIG_PATH="$ROOT/hivemind_exp/configs/gpu/grpo-qwen-2.5-${PARAM_B}b-bnb-4bit-deepseek-r1.yaml" ;;
-        0.5 | 1.5 | 7) CONFIG_PATH="$ROOT/hivemind_exp/configs/gpu/grpo-qwen-2.5-${PARAM_B}b-deepseek-r1.yaml" ;;
-        *) exit 1 ;;
-    esac
+    if [ "$SETUP_MODE" == "MANUAL" ]; then
+        case "$PARAM_B" in
+            32 | 72) CONFIG_PATH="$ROOT/hivemind_exp/configs/gpu/grpo-qwen-2.5-${PARAM_B}b-bnb-4bit-deepseek-r1.yaml" ;;
+            0.5 | 1.5 | 7) CONFIG_PATH="$ROOT/hivemind_exp/configs/gpu/grpo-qwen-2.5-${PARAM_B}b-deepseek-r1.yaml" ;;
+            *) exit 1 ;;
+        esac
+    fi
+    # If AUTO, CONFIG_PATH is already set.
 
     if [ "$USE_BIG_SWARM" = true ]; then
         GAME="dapo"
