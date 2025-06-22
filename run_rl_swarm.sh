@@ -116,7 +116,8 @@ perform_automatic_setup() {
             param_options+=("$param_size")
             config_map["$param_size"]="$config_path"
             
-            if (( $(echo "$param_size >= 32" | bc -l) )); then
+            # Use bash arithmetic instead of bc
+            if (( $(echo "$param_size >= 32" | awk '{print int($1)}') )); then
                 has_large_model=true
             fi
         fi
@@ -125,18 +126,30 @@ perform_automatic_setup() {
     # Get unique sorted list of parameter options
     IFS=" " read -r -a param_options <<< "$(echo "${param_options[@]}" | tr ' ' '\n' | sort -un | tr '\n' ' ')"
 
+    # Only recommend Math Hard for high-end GPUs
+    high_end_gpus=("rtx3090" "rtx3090ti" "rtx4090" "rtx4080" "rtx4070ti" "a100" "h100" "rtx5000ada" "rtx6000" "v100")
+    is_high_end=false
+    
+    for gpu in "${high_end_gpus[@]}"; do
+        if [[ "$NORMALIZED_GPU_NAME" == *"$gpu"* ]]; then
+            is_high_end=true
+            break
+        fi
+    done
 
-    if [ "$has_large_model" = true ]; then
+    if [ "$is_high_end" = true ] && [ "$has_large_model" = true ]; then
         swarm_prompt="Math (A) or Math Hard (B)? [b/A]"
         default_swarm="B"
+        recommendation="Math Hard"
     else
         swarm_prompt="Math (A) or Math Hard (B)? [A/b]"
         default_swarm="A"
+        recommendation="Math"
     fi
 
     while true; do
         echo -en $GREEN_TEXT
-        read -p ">> Based on your GPU, we recommend Math Hard. Which swarm would you like to join ($swarm_prompt) " ab
+        read -p ">> Based on your GPU, we recommend $recommendation. Which swarm would you like to join ($swarm_prompt) " ab
         echo -en $RESET_TEXT
         ab=${ab:-$default_swarm}
         case $ab in
